@@ -5,7 +5,7 @@ name: Node.js CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, ci-fix-1200-browser-test-ci ]
   pull_request:
     branches: [ master ]
 
