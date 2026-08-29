@@ -5,7 +5,7 @@ name: Node.js CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, validate-issue-regressions-2071-2076-1700-1189-1332 ]
   pull_request:
     branches: [ master ]
 
@@ -41,3 +41,15 @@ jobs:
       - name: npm run test
         run: npm run test
 
+      # #2071のブラウザイベント回帰テストはNode.jsの最新対象で実行
+      - name: Install browser smoke dependencies
+        if: matrix.node-version == '24.x'
+        working-directory: test-browser
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: npm run test:browser:smoke
+        if: matrix.node-version == '24.x'
+        working-directory: test-browser
+        run: npm run test:browser:smoke
