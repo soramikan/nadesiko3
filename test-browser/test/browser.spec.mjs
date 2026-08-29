@@ -32,6 +32,16 @@ test('browser smoke test', async ({ page }) => {
   assertNoFailures(result)
 })
 
+test('browser event error smoke #2071', async ({ page }) => {
+  await page.goto('/test-browser/test/html/browser-smoke-runner.html')
+  const errors = await page.evaluate(async () => {
+    const { runBrowserEventErrorCase } = await import('/test-browser/test/browser/test/plugin_browser_smoke_test.js')
+    return runBrowserEventErrorCase()
+  })
+  expect(errors).toHaveLength(1)
+  expect(errors[0]).toMatch(/^\[エラー\]main\.nako3\(4行目\): イベント内/)
+})
+
 test('browser full test', async ({ page }) => {
   test.setTimeout(300000)
   // フルテストはより長いタイムアウトを使用する

@@ -25,6 +25,32 @@ async function runCase (title, fn, failures) {
 }
 
 /**
+ * DOMイベント内の実行時エラーがloggerへ通知されることを確認する (#2071)
+ */
+export function runBrowserEventErrorCase () {
+  document.body.innerHTML = '<button id="button">実行</button>'
+  const nako = createCompiler()
+  const errors = []
+  const onError = ({ noColor }) => { errors.push(noColor) }
+  const originalConsoleError = console.error
+  nako.logger.addListener('error', onError)
+  console.error = () => {}
+  try {
+    nako.run(`
+要素は「#button」
+要素の「click」がDOMイベント発火した時には
+「イベント内」のエラー発生
+ここまで
+`, 'main.nako3')
+    document.getElementById('button').click()
+  } finally {
+    console.error = originalConsoleError
+    nako.logger.removeListener(onError)
+  }
+  return errors
+}
+
+/**
  * 旧plugin_browser_smoke_test.jsの内容をMocha非依存で実行する
  */
 export async function runBrowserSmokeCases () {

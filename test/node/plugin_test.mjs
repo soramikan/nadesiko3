@@ -42,7 +42,7 @@ describe('plugin_test', () => {
     await cmp(`${scope};scope2__朝食取得して表示。`, '2000')
     await cmp(`${reverse};scope1__朝食取得して表示;scope2__朝食取得して表示。`, '1000\n2000')
   })
-  it('NAKO3スコープテスト1+2__変数', async () => {
+  it('NAKO3スコープテスト1+2__変数 #1332', async () => {
     const scope = `!「${scope1}」を取り込む。\n!「${scope2}」を取り込む。\n`
     await cmp(`${scope};朝食値段を表示。`, '1000')
     await cmp(`${scope};scope2__朝食値段=2500;scope2__朝食取得して表示。`, '2500')

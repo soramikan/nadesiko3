@@ -131,6 +131,51 @@ describe('error_message', () => {
         }
       )
     })
+    it('preCode直後の1行目を0行目にしない #2076', () => {
+      const compiler = new NakoCompiler()
+      const preCode = 'A=1\n'
+      assert.throws(
+        () => compiler.run(preCode + '1のエラー発生', 'main.nako3', preCode),
+        err => {
+          assert.strictEqual(err.type, 'NakoRuntimeError')
+          assert.strictEqual(err.line, 0) // ユーザーコードの1行目
+          assert.strictEqual(err.file, 'main.nako3')
+          assert.match(err.message, /main\.nako3\(1行目\)/)
+          return true
+        }
+      )
+    })
+    it('関数宣言後の実行時エラー位置を保持する #1700', () => {
+      const cases = [
+        { code: '●Aとは\n戻る\nここまで\n「あ」でエラー発生', line: 3 },
+        { code: '●Aとは\n戻る\nここまで\n\n「あ」でエラー発生', line: 4 }
+      ]
+      for (const { code, line } of cases) {
+        const compiler = new NakoCompiler()
+        assert.throws(
+          () => compiler.run(code, 'main.nako3'),
+          err => {
+            assert.strictEqual(err.type, 'NakoRuntimeError')
+            assert.strictEqual(err.line, line)
+            assert.strictEqual(err.file, 'main.nako3')
+            return true
+          }
+        )
+      }
+    })
+    it('CRLFでも実行時エラーの行番号を保持する #1189', () => {
+      const compiler = new NakoCompiler()
+      const code = Array.from({ length: 9 }, (_, i) => `${i + 1}を表示`).concat('「あ」でエラー発生').join('\r\n')
+      assert.throws(
+        () => compiler.run(code, 'main.nako3'),
+        err => {
+          assert.strictEqual(err.type, 'NakoRuntimeError')
+          assert.strictEqual(err.line, 9) // 10行目
+          assert.strictEqual(err.file, 'main.nako3')
+          return true
+        }
+      )
+    })
     it('エラー位置をプロパティから取得 - repeatTimes', () => {
       const nako = new NakoCompiler()
       assert.throws(
@@ -183,6 +228,14 @@ describe('error_message', () => {
       compiler.logger.addListener('warn', ({ noColor }) => { log += noColor })
       await compiler.runAsync('!厳しくチェック;xを表示', 'main.nako3')
       assert.strictEqual(log.split('。')[0], '[警告]main.nako3(1行目): 変数『x』は定義されていません')
+    })
+    it('CRLFでも警告の行番号を保持する #1189', async () => {
+      const compiler = new NakoCompiler()
+      let log = ''
+      compiler.logger.addListener('warn', ({ noColor }) => { log += noColor })
+      const code = ['!厳しくチェック', '1を表示', '2を表示', '3を表示', '4を表示', '5を表示', 'xを表示'].join('\r\n')
+      await compiler.runAsync(code, 'main.nako3')
+      assert.match(log, /^\[警告\]main\.nako3\(7行目\): 変数『x』は定義されていません/)
     })
     it('存在しない高速化オプションを指定したとき', async () => {
       const compiler = new NakoCompiler()
