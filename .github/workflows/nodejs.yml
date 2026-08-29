@@ -5,7 +5,7 @@ name: Node.js CI
 
 on:
   push:
-    branches: [ master, ci-fix-1200-browser-test-ci-stacked ]
+    branches: [ master, ci-fix-1200-stacked-node24 ]
   pull_request:
     branches: [ master ]
 
@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         # Node.js v20はEOLのため対象外。ドキュメント上の最低サポートに合わせて 22.x を含めます
-        node-version: [24.x, 22.x]
+        node-version: [24.x]
 
     steps:
       - name: Checkout submodule
