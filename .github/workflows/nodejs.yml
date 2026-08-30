@@ -8,7 +8,7 @@ permissions:
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, validate-2436-on-pr2434 ]
   pull_request:
     branches: [ master ]
 
