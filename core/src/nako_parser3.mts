@@ -2618,6 +2618,7 @@ export class NakoParser extends NakoParserBase {
       // 配列の直後に@や[]があるか？
       // ただし、助詞がある場合には、別の引数の可能性があるので無視。 (例) [0,1,2]を[3,4,5]に配列＊＊＊
       if (val.josi === '' && this.checkTypes(['@', '['])) {
+        const startIndex = this.index
         const ast: Ast = {
           type: 'ref_array_value',
           name: '@',
@@ -2627,13 +2628,17 @@ export class NakoParser extends NakoParserBase {
           end: this.peekSourceMap()
         }
         while (!this.isEOF()) {
-          if (!this.yValueWordGetIndex(ast)) { break }
+          const previousIndex = this.index
+          if (!this.yValueWordGetIndex(ast) || this.index === previousIndex) { break }
         }
+        // 後置アクセスとして読めなければ、配列の次の要素として上位で解析する (#2436)
+        if (this.index === startIndex) { break }
         val = ast
         continue
       }
       // 配列の直の後に$(プロパティ)があるか？
       if (this.check('$')) {
+        const startIndex = this.index
         const ast: Ast = {
           type: 'ref_array_value',
           name: '$',
@@ -2643,8 +2648,11 @@ export class NakoParser extends NakoParserBase {
           end: this.peekSourceMap()
         }
         while (!this.isEOF()) {
-          if (!this.yValueWordGetProp(ast)) { break }
+          const previousIndex = this.index
+          if (!this.yValueWordGetProp(ast) || this.index === previousIndex) { break }
         }
+        // 不完全なプロパティアクセスでは未完成のASTを採用しない (#2436)
+        if (this.index === startIndex) { break }
         val = ast
         continue
       }
