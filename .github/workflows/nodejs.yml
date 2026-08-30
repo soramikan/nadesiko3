@@ -5,7 +5,7 @@ name: Node.js CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, ci-review-fix-pr2432 ]
   pull_request:
     branches: [ master ]
 
@@ -40,4 +40,3 @@ jobs:
       # run test
       - name: npm run test
         run: npm run test
-
