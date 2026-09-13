@@ -563,6 +563,19 @@ describe('plugin_httpserver_test', () => {
       `--${escapedBoundary}--\r\n`
     ].join(''))
     assert.deepStrictEqual(await postRequest('multipart/form-data; boundary="a\\\\b"', escapedBody), { statusCode: 200, body: 'hello' })
+    // 前のパラメータとの `;` 区切りがないboundaryは採用せず400を返す(厳格モード)
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; note="x"boundary=${boundary}`), { statusCode: 400, body: 'Bad Request.' })
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; note="x" boundary=${boundary}`), { statusCode: 400, body: 'Bad Request.' })
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; note=x boundary=${boundary}`), { statusCode: 400, body: 'Bad Request.' })
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; x boundary=${boundary}`), { statusCode: 400, body: 'Bad Request.' })
+    // `;;` のように空のパラメータが挟まれた場合も不正な断片とみなし400を返す
+    assert.deepStrictEqual(await postRequest(`multipart/form-data;; boundary=${boundary}`), { statusCode: 400, body: 'Bad Request.' })
+    // 有効なboundaryの直後に区切りのない断片があっても400を返す(そのパラメータ自体が区切り欠落)
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=${boundary} note="y"`), { statusCode: 400, body: 'Bad Request.' })
+    // 正しく `;` 区切りのパラメータは引き続き解析できる
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; note="x"; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
+    // 末尾の `;` は後続パラメータがないため許容される
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=${boundary};`), { statusCode: 200, body: 'hello' })
     // 400応答の後もサーバが生きていて正常な要求を処理できる
     assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
   })

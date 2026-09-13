@@ -112,8 +112,9 @@ class EasyURLDispather {
             // boundaryパラメータは quoted-string とエスケープを認識するパーサ(parseContentDisposition)で取得する。
             // パラメータ名は大小文字を区別せず、`=`前後の空白・引用符付き値も許容する(非引用値はtokenとして解釈)。
             // 正規表現だと他パラメータの引用値内に現れる '; boundary=' に誤マッチするため。
-            // 重複パラメータは常に最後の値を採用する(後勝ち)
-            const boundary = (parseContentDisposition(contentType)['boundary'] ?? '').trim()
+            // strictモードを有効にし、前のパラメータとの `;` 区切りがないboundaryは採用しない
+            // (区切り欠落の不正要求を400にするため)。重複パラメータは常に最後の値を採用する(後勝ち)
+            const boundary = (parseContentDisposition(contentType, true)['boundary'] ?? '').trim()
             if (boundary === '') {
               // boundaryが得られない不正なmultipart要求は、フィールドを静かに消さず400を返す(#2495)
               console.error(`${HTTPSERVER_LOGID} multipart/form-data 要求に boundary がありません`)
@@ -261,6 +262,10 @@ class EasyURLDispather {
  * キーは大文字小文字を区別しない(小文字化して格納)。`=` 前後の Optional Whitespace は許容する。
  * パラメータの順序に依存せず `name` と `filename` を正しく分離するためのヘルパーとして導入し、
  * Content-Type の boundary 取得にも流用する。(#2494)
+ * strict を true にすると、各パラメータが必ず `;` の直後から始まり、値の後が OWS を除いて
+ * `;` または末尾であることを検証する。区切りのない断片に遭遇した時点で解析を打ち切り、
+ * それ以降のパラメータは採用しない(先頭の型部分は最初の `;` まで読み飛ばす)。
+ * Content-Type の boundary 取得のように区切り欠落を受理したくない用途向け。(#2495)
  */
 // RFC 7230 の separators を使用。ただし `'` は tchar であると同時に
 // RFC 5987 の `charset'language'value` 区切りにも使うため区切り文字として扱わない。
@@ -316,34 +321,46 @@ function parseCDValue(headerValue: string, start: number): { value: string, next
   return { value: val, next: i }
 }
 
-function parseContentDisposition(headerValue: string): { [key: string]: string } {
+function parseContentDisposition(headerValue: string, strict = false): { [key: string]: string } {
   // obs-fold (CRLF 1*(SP/HTAB)) を単一 SP に正規化してから解析する
   const normalized = headerValue.replace(/\r\n[ \t]+/g, ' ')
   // Object.create(null)により __proto__ 等のキーでもプロトタイプ汚染せず、自前プロパティとして扱える
   const params: { [key: string]: string } = Object.create(null)
   let i = 0
 
-  // 先頭の disposition-type (form-data/inline/attachment 等) を token として読み、
-  // その後の OWS と `;` を正しくスキップする。
-  // `name="foo"` のように type がない場合(= が先に現れる場合)はスキップせず
-  // その位置からパラメータ解析を始める
-  let j = 0
-  while (j < normalized.length && CD_SEPARATORS.indexOf(normalized[j]) < 0 &&
-         normalized.charCodeAt(j) >= 0x21 && normalized.charCodeAt(j) <= 0x7e) { j++ }
-  while (j < normalized.length && (normalized[j] === ' ' || normalized[j] === '\t')) { j++ }
-  if (j < normalized.length && normalized[j] === ';') {
-    i = j + 1
-  } else if (j < normalized.length && normalized[j] === '=') {
-    // type がなく最初のパラメータから始まる
-    i = 0
+  if (strict) {
+    // strict モードでは先頭の型部分を読み飛ばし、最初の ';' 以降をパラメータ部とする
+    const semiIdx = normalized.indexOf(';')
+    i = semiIdx >= 0 ? semiIdx + 1 : normalized.length
   } else {
-    // disposition-type の後に ; も = もない場合は、その位置からパラメータ解析を再開する
-    i = j
+    // 先頭の disposition-type (form-data/inline/attachment 等) を token として読み、
+    // その後の OWS と `;` を正しくスキップする。
+    // `name="foo"` のように type がない場合(= が先に現れる場合)はスキップせず
+    // その位置からパラメータ解析を始める
+    let j = 0
+    while (j < normalized.length && CD_SEPARATORS.indexOf(normalized[j]) < 0 &&
+           normalized.charCodeAt(j) >= 0x21 && normalized.charCodeAt(j) <= 0x7e) { j++ }
+    while (j < normalized.length && (normalized[j] === ' ' || normalized[j] === '\t')) { j++ }
+    if (j < normalized.length && normalized[j] === ';') {
+      i = j + 1
+    } else if (j < normalized.length && normalized[j] === '=') {
+      // type がなく最初のパラメータから始まる
+      i = 0
+    } else {
+      // disposition-type の後に ; も = もない場合は、その位置からパラメータ解析を再開する
+      i = j
+    }
   }
 
   while (i < normalized.length) {
-    // セパレータと空白をスキップ
-    while (i < normalized.length && (normalized[i] === ';' || normalized[i] === ' ' || normalized[i] === '\t')) { i++ }
+    if (strict) {
+      // strict モードでは ';' は直前の値の後に消費済みなので OWS のみスキップする。
+      // ここで OWS 以外が続く場合は区切りのない断片であり、後続の解析を打ち切る
+      while (i < normalized.length && (normalized[i] === ' ' || normalized[i] === '\t')) { i++ }
+    } else {
+      // セパレータと空白をスキップ
+      while (i < normalized.length && (normalized[i] === ';' || normalized[i] === ' ' || normalized[i] === '\t')) { i++ }
+    }
     if (i >= normalized.length) { break }
 
     const iterStart = i
@@ -355,7 +372,9 @@ function parseContentDisposition(headerValue: string): { [key: string]: string }
     // = 前の Optional Whitespace をスキップする
     while (i < normalized.length && (normalized[i] === ' ' || normalized[i] === '\t')) { i++ }
     if (i >= normalized.length || normalized[i] !== '=') {
-      // 不正な断片で i が進まないと無限ループになるため、最低1文字進める
+      // strict モードでは '=' を伴わない不正な断片(空パラメータやベアトークン等)は打ち切る。
+      // 非 strict では不正な断片で i が進まないと無限ループになるため、最低1文字進める
+      if (strict) { break }
       if (i <= iterStart) { i++ }
       continue
     }
@@ -366,6 +385,14 @@ function parseContentDisposition(headerValue: string): { [key: string]: string }
     const parsed = parseCDValue(normalized, i)
     i = parsed.next
     if (i <= iterStart) { i++ }
+
+    if (strict) {
+      // strict モードでは値の後が OWS を除いて ';' または末尾でなければならない。
+      // 区切り欠落ならこの値自体も採用せず打ち切る
+      while (i < normalized.length && (normalized[i] === ' ' || normalized[i] === '\t')) { i++ }
+      if (i < normalized.length && normalized[i] !== ';') { break }
+      if (i < normalized.length) { i++ }
+    }
 
     // RFC 7230 の token 文字のみをキーとして有効にする(空キーや不正な文字は無視)
     if (!CD_KEY_RE.test(key)) { continue }
