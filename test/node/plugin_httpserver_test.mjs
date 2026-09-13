@@ -530,17 +530,21 @@ describe('plugin_httpserver_test', () => {
     assert.deepStrictEqual(await postRequest('text/foo+json', jsonBody), { statusCode: 200, body: 'hello' })
     // urlencodedも大小文字を区別しない
     assert.deepStrictEqual(await postRequest('APPLICATION/X-WWW-FORM-URLENCODED', Buffer.from('a=hello')), { statusCode: 200, body: 'hello' })
-    // 空・空白のみの非引用boundaryが先にあっても、後続の有効なboundaryで解析される(旧来の挙動との互換)
+    // 空・空白のみの非引用boundaryが先にあっても、後続の有効なboundaryで解析される(重複パラメータは後勝ち)
     assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
     assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary= ; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
-    // 引用符付きの空boundaryは空値として確定し400になる(非引用の空値とは対称でない点は旧来の先勝ち仕様を継承)
-    assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=""; boundary=${boundary}`), { statusCode: 400, body: 'Bad Request.' })
+    // 引用符付きの空boundaryも後続の有効なboundaryで上書きされる(後勝ち)
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=""; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
+    // 末尾が空のboundaryなら後勝ちで空になり400を返す
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=${boundary}; boundary=`), { statusCode: 400, body: 'Bad Request.' })
     // `=`と値の間の空白は許容される
     assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary= ${boundary}`), { statusCode: 200, body: 'hello' })
     // `;`を欠くmalformedなContent-Typeはmultipartとは扱われず生本文として処理される(厳格化)
     assert.deepStrictEqual(await postRequest(`multipart/form-data boundary=${boundary}`), { statusCode: 200, body: 'undefined' })
     // `;`直後の空白がなくても解析できる
     assert.deepStrictEqual(await postRequest(`multipart/form-data;boundary=${boundary}`), { statusCode: 200, body: 'hello' })
+    // 他パラメータの引用値内にある '; boundary=' には誤マッチしない(quoted-string考慮のパーサで解析)
+    assert.deepStrictEqual(await postRequest(`multipart/form-data; note="x; boundary=fake"; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
     // 引用符内の`;`を含むboundary値も正しく取得できる
     const semicolonBoundary = 'a;b'
     const semicolonBody = Buffer.from([
@@ -550,6 +554,15 @@ describe('plugin_httpserver_test', () => {
       `--${semicolonBoundary}--\r\n`
     ].join(''))
     assert.deepStrictEqual(await postRequest('multipart/form-data; boundary="a;b"', semicolonBody), { statusCode: 200, body: 'hello' })
+    // 引用符内のエスケープ(quoted-pair)を解除してboundary値を取得できる
+    const escapedBoundary = 'a\\b'
+    const escapedBody = Buffer.from([
+      `--${escapedBoundary}\r\n`,
+      `Content-Disposition: form-data; name="a"\r\n\r\n`,
+      `hello\r\n`,
+      `--${escapedBoundary}--\r\n`
+    ].join(''))
+    assert.deepStrictEqual(await postRequest('multipart/form-data; boundary="a\\\\b"', escapedBody), { statusCode: 200, body: 'hello' })
     // 400応答の後もサーバが生きていて正常な要求を処理できる
     assert.deepStrictEqual(await postRequest(`multipart/form-data; boundary=${boundary}`), { statusCode: 200, body: 'hello' })
   })

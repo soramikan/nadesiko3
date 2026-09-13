@@ -109,13 +109,11 @@ class EasyURLDispather {
           // パラメータ部(;以降)を除いたメディア型本体で判定する
           const mediaType = contentType.split(';', 1)[0].trim().toLowerCase()
           if (mediaType === 'multipart/form-data') {
-            // boundaryパラメータ名も大小文字を区別しない。値は引用符付き/なし両方を許容する。
-            // メディア型がmultipartの場合boundaryは必ず';'以降のパラメータ部にあるため';'にアンカーし、
-            // xboundary=のような別名パラメータへの誤マッチを防ぐ。空・空白のみの非引用値はマッチさせず、
-            // 重複パラメータ時に後続の有効なboundaryを拾えるようにする(旧来の挙動との互換)
-            // 既知の制限: 他パラメータの引用値内に現れる '; boundary=' には誤マッチし得る(旧来と同じ挙動)
-            const boundaryMatch = contentType.match(/;\s*boundary\s*=\s*(?:"([^"]*)"|([^\s;][^;]*))/i)
-            const boundary = boundaryMatch ? (boundaryMatch[1] ?? boundaryMatch[2] ?? '').trim() : ''
+            // boundaryパラメータは quoted-string とエスケープを認識するパーサ(parseContentDisposition)で取得する。
+            // パラメータ名は大小文字を区別せず、`=`前後の空白・引用符付き値も許容する(非引用値はtokenとして解釈)。
+            // 正規表現だと他パラメータの引用値内に現れる '; boundary=' に誤マッチするため。
+            // 重複パラメータは常に最後の値を採用する(後勝ち)
+            const boundary = (parseContentDisposition(contentType)['boundary'] ?? '').trim()
             if (boundary === '') {
               // boundaryが得られない不正なmultipart要求は、フィールドを静かに消さず400を返す(#2495)
               console.error(`${HTTPSERVER_LOGID} multipart/form-data 要求に boundary がありません`)
@@ -255,12 +253,14 @@ class EasyURLDispather {
     return params
   }
 }
-/** Content-Disposition ヘッダ値を解析してパラメータ辞書を返す。
- * `form-data; name="upload"; filename="photo.txt"` のような形式を、
- * `;`区切りで `キー=値` 形式として取り出す。値がダブルクォート付きの場合は
- * quoted-string として解析し、値中の `;`・`=`・エスケープ(`\"`, `\\`)も処理する。
- * キーは大文字小文字を区別しない。`=` 前後の Optional Whitespace は許容する。
- * パラメータの順序に依存せず `name` と `filename` を正しく分離するためのヘルパー。(#2494)
+/** `;`区切りの `キー=値` パラメータを持つヘッダ値を解析してパラメータ辞書を返す汎用パーサ。
+ * Content-Disposition(`form-data; name="upload"; filename="photo.txt"`)や
+ * Content-Type(`multipart/form-data; boundary=X`)の解析に使用する。
+ * 値がダブルクォート付きの場合は quoted-string として解析し、値中の `;`・`=`・
+ * エスケープ(`\"`, `\\`)も処理する。非引用値は RFC 7230 の token として解釈する。
+ * キーは大文字小文字を区別しない(小文字化して格納)。`=` 前後の Optional Whitespace は許容する。
+ * パラメータの順序に依存せず `name` と `filename` を正しく分離するためのヘルパーとして導入し、
+ * Content-Type の boundary 取得にも流用する。(#2494)
  */
 // RFC 7230 の separators を使用。ただし `'` は tchar であると同時に
 // RFC 5987 の `charset'language'value` 区切りにも使うため区切り文字として扱わない。
