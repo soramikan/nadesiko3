@@ -1688,32 +1688,44 @@ export class NakoGen {
     const localVars = []
     for (const name of Array.from(this.varsSet.names.values())) {
       if (NakoGen.isValidIdentifier(name)) {
-        localVars.push({ str: JSON.stringify(name), js: this.varname_get(name) })
+        localVars.push({ name, str: JSON.stringify(name) })
       }
     }
 
     // --- 実行前 ---
-    // 全ての展開されていないローカル変数を __self.__locals にコピーする
-    begin += '__self.__locals = __vars;\n'
-    // 全ての展開されたローカル変数を __self.__locals に保存する
-    if (localVars.length > 0) {
-      begin += '/* 全ての展開されたローカル変数を __self.__locals に保存 */\n'
-      for (const v of localVars) {
-        begin += `__self.__locals.set(${v.str}, ${v.js});\n`
-      }
-    }
+    // __self.__locals を現在のスコープ(__self.__vars)に設定する。
+    // __vars は生成コード先頭で __varslist[2] に固定されたままなので使わない。
+    // __vars を設定するとローカル変数が __varslist[2] に書き込まれ、
+    // 関数終了後や他の関数から観測できてしまう (#2534)
+    const prevLocals = `__nako_prevlocals${this.loopId}`
+    const syncScope = `__nako_syncscope${this.loopId}`
+    this.loopId++
+    begin += `const ${prevLocals} = __self.__locals;\n`
+    begin += `const ${syncScope} = __self.__vars;\n`
+    begin += `__self.__locals = ${syncScope};\n`
+    // __self.__locals が現在スコープと同じMapを指すため、
+    // ローカル変数の個別コピーは不要 (#2534)
 
     // --- 実行後 ---
-    // 全ての展開されたローカル変数を __self.__locals から受け取る
-    // 「それ」は関数の実行結果を受け取るために使うためスキップ。
-    if (localVars.length > 0) {
-      end += '/* 全ての展開されたローカル変数を __self.__locals から受け取る */\n'
-      for (const v of localVars) {
-        if (v.js !== 'それ') {
-          end += `__self.__varslist[2].set(${v.str}, __self.__locals.get(${v.str}));\n`
-        }
-      }
+    // __self.__locals からローカル変数を呼出時点のスコープへ書き戻す。
+    // プラグインが __self.__locals を Map でない値に差し替えた場合は書き戻しを
+    // 行わない。また書き戻し自体が失敗しても呼出元の例外を置換しないよう
+    // catch で無視し、__self.__locals の復元は finally で確実に行う (#2534)
+    end += '/* __self.__locals からローカル変数を呼出時点のスコープへ書き戻す */\n'
+    end += 'try {\n'
+    end += 'if (__self.__locals instanceof Map) {\n'
+    for (const v of localVars) {
+      // 「それ」は関数の実行結果の受け取り用なので書き戻し対象外。
+      // (「それ無効」モードでは localVars に「それ」自体が含まれない)
+      if (v.name === 'それ') { continue }
+      // __self.__locals に存在するキーのみ書き戻す (存在しないキーを undefined で実体化しない)
+      end += `if (__self.__locals.has(${v.str})) { ${syncScope}.set(${v.str}, __self.__locals.get(${v.str})); }\n`
     }
+    end += '}\n'
+    end += '} catch (e) {} finally {\n'
+    // __self.__locals を呼び出し前の値に戻す (finally 内で実行される) (#2534)
+    end += `__self.__locals = ${prevLocals};\n`
+    end += '}\n'
     return { begin, end }
   }
 
@@ -1852,8 +1864,12 @@ export class NakoGen {
       funcEnd += ';__self.isSetter = false;\n'
     }
     // 関数内 (__varslist.length > 3) からプラグイン関数 (res.i === 0) を呼び出すとき、 そのプラグイン関数がpureでなければ
-    // 呼び出しの直前に全てのローカル変数をthis.__localsに入れる。
-    if (res.i === 0 && this.varslistSet.length > 3 && func.pure !== true && this.speedMode.forcePure === 0) { // undefinedはfalseとみなす
+    // 呼び出しの直前に __self.__locals を現在のスコープ(__self.__vars)に向け、
+    // 呼び出し後に元の値へ戻すコードを生成する。(#2534)
+    // なお asyncFn のプラグイン関数は登録時に pure=true に強制される (core#142) が、
+    // reset() では pure=true 化前のスナップショットから funclist が再構築されるため
+    // pure=false のまま残りうる。同期ウィンドウが await を跨がないようここでも除外する。
+    if (res.i === 0 && this.varslistSet.length > 3 && func.pure !== true && func.asyncFn !== true && this.speedMode.forcePure === 0) { // undefinedはfalseとみなす
       const sync = this.genLocalVarsSyncCode()
       funcBegin += sync.begin
       funcEnd += sync.end

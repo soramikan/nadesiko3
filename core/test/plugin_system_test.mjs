@@ -1116,4 +1116,232 @@ describe('plugin_system_test', async () => {
     g.__locals.set('F', undefined)
     assert.strictEqual(g.__exec('F', []), 'global fn')
   })
+  it('関数内のローカル変数が他の関数やトップレベルに漏洩しない #2534', async () => {
+    // pureでない命令(ここではJSオブジェクト取得)を呼んだ関数のローカル変数が
+    // __varslist[2] / __self.__locals に残留せず、後続の関数の参照を遮蔽しない
+    // 先の関数が設定した falsy な値でも遮蔽しない
+    await cmp('●テストA\n　A=0\n　「A」のJSオブジェクト取得を戻す\nここまで\n●テストB\n　「A」のJSオブジェクト取得を戻す\nここまで\nA=99\nテストA()。\nテストB()を表示', '99')
+    await cmp('●テストA\n　A=偽\n　「A」のJSオブジェクト取得を戻す\nここまで\n●テストB\n　「A」のJSオブジェクト取得を戻す\nここまで\nA=99\nテストA()。\nテストB()を表示', '99')
+    await cmp('●テストA\n　A=「」\n　「A」のJSオブジェクト取得を戻す\nここまで\n●テストB\n　「A」のJSオブジェクト取得を戻す\nここまで\nA=99\nテストA()。\nテストB()を表示', '99')
+    await cmp('●テストA\n　A=NULL\n　「A」のJSオブジェクト取得を戻す\nここまで\n●テストB\n　「A」のJSオブジェクト取得を戻す\nここまで\nA=99\nテストA()。\nテストB()を表示', '99')
+    // トップレベルからも残留したローカル変数は見えない
+    await cmp('●テストA\n　A=0\n　「A」のJSオブジェクト取得を戻す\nここまで\nA=99\nテストA()。\n「A」のJSオブジェクト取得を表示', '99')
+    // グローバル変数も無ければ null (JSオブジェクト取得のデフォルト値) を返す
+    await cmp('●テストA\n　A=0\n　「A」のJSオブジェクト取得を戻す\nここまで\nテストA()。\n「A」のJSオブジェクト取得を表示', 'null')
+    // 関数内では従来どおり自身のローカル変数が見える(回帰確認)
+    await cmp('●テストA\n　A=0\n　「A」のJSオブジェクト取得を戻す\nここまで\nA=99\nテストA()を表示', '0')
+  })
+  it('入れ子の関数呼び出しで内側のローカル変数が外側に漏洩しない #2534', async () => {
+    // 内側の関数でpureでない命令を呼んでも、外側の関数のその後の探索に内側のローカル変数は見えない
+    await cmp('●内側\n　B=0\n　「B」のJSオブジェクト取得を戻す\nここまで\n●外側\n　内側()。\n　「B」のJSオブジェクト取得を戻す\nここまで\nB=99\n外側()を表示', '99')
+  })
+  it('ローカル変数の同期後に__varslist[2]と__localsへ残留しない #2534', async () => {
+    const nako = new NakoCompiler()
+    const g = await nako.runAsync('●テストA\n　A=0\n　「A」のJSオブジェクト取得を戻す\nここまで\nテストA()。', 'main.nako3')
+    // 関数のローカル変数がトップレベルのスコープ __varslist[2] に書き込まれない
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    // __self.__locals も呼び出し前の値に復元され、関数のスコープを指したまま残らない
+    assert.strictEqual(g.__locals.has('A'), false)
+    assert.strictEqual(g.__findVar('A', 'def'), 'def')
+  })
+  it('VOID型(return_none)のpureでない命令でもローカル変数が漏洩しない #2534', async () => {
+    // 値を返さない命令は genVoidCallCode(文レベルのtry/finally)を通るため、そちらの経路も固定する
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      ローカル書込: {
+        type: 'func', josi: [['を']], pure: false, return_none: true,
+        fn: (v, sys) => { sys.__locals.set('W', v) }
+      }
+    })
+    const g = await nako.runAsync('●テストA\n　A=0\n　42をローカル書込。\nここまで\n●テストB\n　「W」のJSオブジェクト取得を戻す\nここまで\nテストA()。\nテストB()を表示。', 'main.nako3')
+    // テストBからはテストAのローカル変数もプラグインが書き込んだ値も見えない
+    assert.strictEqual(g.log, 'null')
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.strictEqual(g.__varslist[2].has('W'), false)
+    assert.strictEqual(g.__locals.has('A'), false)
+    assert.strictEqual(g.__locals.has('W'), false)
+  })
+  it('pureでない命令が__localsへ書き込んだ値が呼出元のローカル変数に反映される #2534', async () => {
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      ローカル書込: {
+        type: 'func', josi: [['を']], pure: false, return_none: true,
+        fn: (v, sys) => { sys.__locals.set('W', v) }
+      }
+    })
+    const g = await nako.runAsync('●テストA\n　42をローカル書込。\n　Wを戻す\nここまで\nテストA()を表示。', 'main.nako3')
+    assert.strictEqual(g.log, '42')
+  })
+  it('pureでない命令が例外を投げても__localsが復元され変数が残留しない #2534', async () => {
+    const nako = new NakoCompiler()
+    try {
+      await nako.runAsync('●テストA\n　A=0\n　「XXX」を[]でJS関数実行\nここまで\nテストA()。', 'main.nako3')
+      assert.fail('実行時エラーになるはずです')
+    } catch (err) {
+      // JS関数実行が投げる実行時エラー(想定内のエラーであることを固定)
+      assert.ok(err instanceof Error)
+    }
+    const g = nako.__globalObj
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.strictEqual(g.__locals.has('A'), false)
+    assert.strictEqual(g.__findVar('A', 'def'), 'def')
+  })
+  it('pureでない命令を同一関数内で複数回呼んでも各呼出のローカル同期が独立して機能する #2534', async () => {
+    // loopId による一意採番で const の重複宣言(SyntaxError)が起きないことの回帰保護
+    // VOID型と値返し型の呼出を混在させる
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      ローカル書込: {
+        type: 'func', josi: [['を']], pure: false, return_none: true,
+        fn: (v, sys) => { sys.__locals.set('W', v) }
+      }
+    })
+    const g = await nako.runAsync('●テストA\n　A=0\n　42をローカル書込。\n　B=「A」のJSオブジェクト取得\n　1をローカル書込。\n　Wを戻す\nここまで\nテストA()を表示。', 'main.nako3')
+    // 3箇所の呼出それぞれで同期が機能し、W=1・B=0 が正しく読める
+    assert.strictEqual(g.log, '1')
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.strictEqual(g.__varslist[2].has('B'), false)
+    assert.strictEqual(g.__varslist[2].has('W'), false)
+    assert.strictEqual(g.__locals.has('W'), false)
+  })
+  it('プラグインが__locals自体を差し替えても書き戻しと「それ」のスキップが機能する #2534', async () => {
+    // プラグインが sys.__locals オブジェクトを差し替えた場合、
+    // 読み戻しは差し替え後の __locals から呼出時点のスコープへ行われる。
+    // ただし「それ」は関数の実行結果を受け取るため書き戻し対象外。
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      ローカル差替: {
+        type: 'func', josi: [], pure: false, return_none: true,
+        fn: (sys) => { sys.__locals = new Map([['A', 42], ['それ', 'X']]) }
+      }
+    })
+    const g = await nako.runAsync('●テストA\n　A=0\n　それ=「元」\n　ローカル差替。\n　「{A}/{それ}」を戻す\nここまで\nテストA()を表示。', 'main.nako3')
+    // 差し替えた __locals の A=42 が呼出元スコープへ書き戻され、それ=「元」は「X」で上書きされない
+    assert.strictEqual(g.log, '42/元')
+  })
+  it('プラグインが__localsをMap以外に差し替えてもエラーにならず復元される #2534', async () => {
+    // Map でない値への差し替えでは書き戻し自体をスキップし、__locals は復元される
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      ローカル破壊: {
+        type: 'func', josi: [], pure: false, return_none: true,
+        fn: (sys) => { sys.__locals = 'not a map' }
+      }
+    })
+    const g = await nako.runAsync('●テストA\n　A=0\n　ローカル破壊。\n　Aを戻す\nここまで\nテストA()を表示。', 'main.nako3')
+    assert.strictEqual(g.log, '0')
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.ok(g.__locals instanceof Map)
+    assert.strictEqual(g.__locals.has('A'), false)
+  })
+  it('プラグインが__localsをMap以外に差し替えて例外を投げても元の例外が伝播する #2534', async () => {
+    // 書き戻しが TypeError になって元の例外を置換しないことの回帰保護
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      破壊例外: {
+        type: 'func', josi: [], pure: false, return_none: true,
+        fn: (sys) => { sys.__locals = 'not a map'; throw new Error('plugin error') }
+      }
+    })
+    try {
+      await nako.runAsync('●テストA\n　破壊例外。\nここまで\nテストA()。', 'main.nako3')
+      assert.fail('実行時エラーになるはずです')
+    } catch (err) {
+      // プラグインが投げた元のエラーメッセージが保全される(書き戻しのTypeErrorで置換されない)
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /plugin error/)
+    }
+    const g = nako.__globalObj
+    assert.ok(g.__locals instanceof Map)
+    assert.strictEqual(g.__findVar('A', 'def'), 'def')
+  })
+  it('プラグインが__localsを例外を投げるMapサブクラスに差し替えても元の例外が伝播する #2534', async () => {
+    // instanceof Map を通過するが has/get が例外を投げるMapを差し替えた場合でも、
+    // 書き戻しの失敗が呼出元の例外を置換しないことを確認
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      破壊例外2: {
+        type: 'func', josi: [], pure: false, return_none: true,
+        fn: (sys) => {
+          const m = new Map()
+          m.has = () => { throw new Error('has fail') }
+          sys.__locals = m
+          throw new Error('plugin error')
+        }
+      }
+    })
+    try {
+      await nako.runAsync('●テストA\n　A=0\n　破壊例外2。\nここまで\nテストA()。', 'main.nako3')
+      assert.fail('実行時エラーになるはずです')
+    } catch (err) {
+      // 書き戻しの失敗('has fail')ではなく、プラグインが投げた元の例外が伝播すること
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /plugin error/)
+      assert.doesNotMatch(err.message, /has fail/)
+    }
+    const g = nako.__globalObj
+    assert.ok(g.__locals instanceof Map)
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.strictEqual(g.__findVar('A', 'def'), 'def')
+  })
+  it('pureでない命令の実行中に呼ばれた関数内でもローカル変数の同期が独立して機能する #2534', async () => {
+    // 「実行」(pure:false)の呼出ウィンドウ内で呼ばれる関数の中で、
+    // さらにpureでない命令を呼ぶ入れ子ケース。内側の同期が外側の __locals を
+    // 正しく保存・復元し、どちらのローカル変数も漏洩しないことを確認する。
+    const nako = new NakoCompiler()
+    const g = await nako.runAsync(
+      '●内側\n' +
+      '　B=0\n' +
+      '　「B」のJSオブジェクト取得を戻す\n' +
+      'ここまで\n' +
+      '●外側\n' +
+      '　A=1\n' +
+      '　R=「内側」を実行。\n' +
+      '　「{R}/{A}」を戻す\n' +
+      'ここまで\n' +
+      '外側()を表示。', 'main.nako3')
+    // 内側は自身の B=0 を返し、外側は自身の A=1 と R=0 を返す
+    assert.strictEqual(g.log, '0/1')
+    // 外側・内側どちらのローカル変数もトップレベル・__locals に残留しない
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.strictEqual(g.__varslist[2].has('B'), false)
+    assert.strictEqual(g.__locals.has('A'), false)
+    assert.strictEqual(g.__locals.has('B'), false)
+  })
+  it('reset後もasyncFn命令にはローカル変数同期が生成されず外側スコープが観測されない #2534', async () => {
+    // asyncFn のプラグイン命令は登録時に pure=true に強制されるが、スナップショットは
+    // pure=true 化前に取られるため reset() で pure=false に戻る (既存の順序バグ)。
+    // このとき関数内からの呼出にローカル変数同期コードが生成されると、同期ウィンドウが
+    // await を跨ぎ、待機中に __locals が外側関数のローカルMapを指したままになる。
+    // コード生成側でも asyncFn を同期対象から除外して防御する。
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      非同期取得: {
+        type: 'func', josi: [], pure: false, asyncFn: true,
+        fn: async (sys) => { return sys.__findVar('A', 'none') }
+      }
+    })
+    nako.reset()
+    // 既存バグの前提: reset() で pure=false に戻る
+    assert.strictEqual(nako.getFunc('非同期取得').pure, false)
+    const g = await nako.runAsync(
+      '●外側\n' +
+      '　A=777\n' +
+      '　非同期取得。\n' +
+      '　それを戻す\n' +
+      'ここまで\n' +
+      '外側()を表示。', 'main.nako3')
+    // 同期ウィンドウが生成されないため、非同期取得から外側のローカルAは見えない
+    assert.strictEqual(g.log, 'none')
+    assert.strictEqual(g.__varslist[2].has('A'), false)
+    assert.strictEqual(g.__locals.has('A'), false)
+  })
 })
