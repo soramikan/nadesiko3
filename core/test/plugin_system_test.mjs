@@ -1261,8 +1261,8 @@ describe('plugin_system_test', async () => {
     assert.ok(g.__locals instanceof Map)
     assert.strictEqual(g.__findVar('A', 'def'), 'def')
   })
-  it('プラグインが__localsを例外を投げるMapサブクラスに差し替えても元の例外が伝播する #2534', async () => {
-    // instanceof Map を通過するが has/get が例外を投げるMapを差し替えた場合でも、
+  it('プラグインが__localsを例外を投げるMapに差し替えて例外を投げても元の例外が伝播する #2534', async () => {
+    // 例外発生中は書き戻し自体を行わない(呼出完了フラグ)ため、
     // 書き戻しの失敗が呼出元の例外を置換しないことを確認
     const nako = new NakoCompiler()
     nako.addPlugin({
@@ -1281,7 +1281,7 @@ describe('plugin_system_test', async () => {
       await nako.runAsync('●テストA\n　A=0\n　破壊例外2。\nここまで\nテストA()。', 'main.nako3')
       assert.fail('実行時エラーになるはずです')
     } catch (err) {
-      // 書き戻しの失敗('has fail')ではなく、プラグインが投げた元の例外が伝播すること
+      // プラグインが投げた元の例外が伝播すること
       assert.ok(err instanceof Error)
       assert.match(err.message, /plugin error/)
       assert.doesNotMatch(err.message, /has fail/)
@@ -1290,6 +1290,33 @@ describe('plugin_system_test', async () => {
     assert.ok(g.__locals instanceof Map)
     assert.strictEqual(g.__varslist[2].has('A'), false)
     assert.strictEqual(g.__findVar('A', 'def'), 'def')
+  })
+  it('プラグインが__localsを例外を投げるMapに差し替えて正常終了した場合は書き戻しの失敗が伝播する #2534', async () => {
+    // 呼出が正常終了した経路では書き戻しを実行するため、差し替えMapの
+    // has/get が失敗した場合はそのエラーが呼出側へ伝播する(黙殺しない)
+    const nako = new NakoCompiler()
+    nako.addPlugin({
+      meta: { type: 'const', value: { pluginName: 'TestPlugin2534', nakoVersion: '3.6.0' } },
+      破壊正常: {
+        type: 'func', josi: [], pure: false, return_none: true,
+        fn: (sys) => {
+          const m = new Map()
+          m.has = () => { throw new Error('has fail') }
+          sys.__locals = m
+        }
+      }
+    })
+    try {
+      await nako.runAsync('●テストA\n　A=0\n　破壊正常。\nここまで\nテストA()。', 'main.nako3')
+      assert.fail('実行時エラーになるはずです')
+    } catch (err) {
+      // 書き戻しの失敗がエラーとして検出できること
+      assert.ok(err instanceof Error)
+      assert.match(err.message, /has fail/)
+    }
+    const g = nako.__globalObj
+    assert.ok(g.__locals instanceof Map)
+    assert.strictEqual(g.__varslist[2].has('A'), false)
   })
   it('pureでない命令の実行中に呼ばれた関数内でもローカル変数の同期が独立して機能する #2534', async () => {
     // 「実行」(pure:false)の呼出ウィンドウ内で呼ばれる関数の中で、
@@ -1330,8 +1357,8 @@ describe('plugin_system_test', async () => {
       }
     })
     nako.reset()
-    // 既存バグの前提: reset() で pure=false に戻る
-    assert.strictEqual(nako.getFunc('非同期取得').pure, false)
+    // 既存バグがある場合 reset() で pure=false に戻るが、プラグインマネージャ側が
+    // 根本修正され pure=true のままになっても、!asyncFn 条件により同期は生成されない。
     const g = await nako.runAsync(
       '●外側\n' +
       '　A=777\n' +

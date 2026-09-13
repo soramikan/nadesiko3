@@ -84,6 +84,7 @@ interface CallCodeParts {
   funcEnd: string; // 呼び出しの後に必ず実行するコード
   isAsync: boolean; // 非同期関数の呼び出しか
   sysPerfKey: string | null; // システム関数の計測キー。計測しないときはnull
+  callDone: string | null; // ローカル変数同期の書き戻し条件となる呼出完了フラグの変数名。同期しないときはnull
 }
 /** コード生成オプション */
 export class NakoGenOptions {
@@ -1679,9 +1680,10 @@ export class NakoGen {
   /**
    * 関数内からpureでないプラグイン関数を呼び出すとき、呼び出しの前後で
    * ローカル変数を __self.__locals と同期するコードを生成する。
-   * @returns 呼び出し前に実行するコード begin と、呼び出し後に実行するコード end
+   * @returns 呼び出し前に実行するコード begin、呼び出し後に実行するコード end、
+   *          呼び出しが正常完了したときに true となる完了フラグ変数名 doneVar
    */
-  private genLocalVarsSyncCode (): { begin: string, end: string } {
+  private genLocalVarsSyncCode (): { begin: string, end: string, doneVar: string } {
     let begin = ''
     let end = ''
     // 展開されたローカル変数の列挙
@@ -1697,36 +1699,40 @@ export class NakoGen {
     // __vars は生成コード先頭で __varslist[2] に固定されたままなので使わない。
     // __vars を設定するとローカル変数が __varslist[2] に書き込まれ、
     // 関数終了後や他の関数から観測できてしまう (#2534)
-    const prevLocals = `__nako_prevlocals${this.loopId}`
-    const syncScope = `__nako_syncscope${this.loopId}`
+    const id = this.loopId
     this.loopId++
+    const prevLocals = `__nako_prevlocals${id}`
+    const syncScope = `__nako_syncscope${id}`
+    const doneVar = `__nako_done${id}`
+    const wbVar = `__nako_wb${id}`
     begin += `const ${prevLocals} = __self.__locals;\n`
     begin += `const ${syncScope} = __self.__vars;\n`
+    begin += `let ${doneVar} = false;\n`
     begin += `__self.__locals = ${syncScope};\n`
     // __self.__locals が現在スコープと同じMapを指すため、
     // ローカル変数の個別コピーは不要 (#2534)
 
     // --- 実行後 ---
-    // __self.__locals からローカル変数を呼出時点のスコープへ書き戻す。
-    // プラグインが __self.__locals を Map でない値に差し替えた場合は書き戻しを
-    // 行わない。また書き戻し自体が失敗しても呼出元の例外を置換しないよう
-    // catch で無視し、__self.__locals の復元は finally で確実に行う (#2534)
-    end += '/* __self.__locals からローカル変数を呼出時点のスコープへ書き戻す */\n'
-    end += 'try {\n'
-    end += 'if (__self.__locals instanceof Map) {\n'
+    // __self.__locals を呼び出し前の値に戻したうえで、ローカル変数を
+    // 呼出時点のスコープへ書き戻す。
+    // 書き戻しは呼出が正常に完了した場合のみ行う (例外が発生している途中で
+    // 書き戻しの失敗が元の例外を置換しないため)。正常完了時に書き戻しが
+    // 失敗した場合は、そのエラーはそのまま呼出側へ伝播する。(#2534)
+    end += '/* __self.__locals を復元しローカル変数を呼出時点のスコープへ書き戻す */\n'
+    end += `const ${wbVar} = __self.__locals;\n`
+    // 差し替えの有無に関わらず __self.__locals を呼び出し前の値に戻す
+    end += `__self.__locals = ${prevLocals};\n`
+    // 書き戻しはプラグインが __self.__locals を別のMapに差し替えた場合のみ必要
+    end += `if (${doneVar} && ${wbVar} !== ${syncScope} && ${wbVar} instanceof Map) {\n`
     for (const v of localVars) {
       // 「それ」は関数の実行結果の受け取り用なので書き戻し対象外。
       // (「それ無効」モードでは localVars に「それ」自体が含まれない)
       if (v.name === 'それ') { continue }
-      // __self.__locals に存在するキーのみ書き戻す (存在しないキーを undefined で実体化しない)
-      end += `if (__self.__locals.has(${v.str})) { ${syncScope}.set(${v.str}, __self.__locals.get(${v.str})); }\n`
+      // 差し替え後のMapに存在するキーのみ書き戻す (存在しないキーを undefined で実体化しない)
+      end += `if (${wbVar}.has(${v.str})) { ${syncScope}.set(${v.str}, ${wbVar}.get(${v.str})); }\n`
     }
     end += '}\n'
-    end += '} catch (e) {} finally {\n'
-    // __self.__locals を呼び出し前の値に戻す (finally 内で実行される) (#2534)
-    end += `__self.__locals = ${prevLocals};\n`
-    end += '}\n'
-    return { begin, end }
+    return { begin, end, doneVar }
   }
 
   /**
@@ -1766,12 +1772,14 @@ export class NakoGen {
 
   /** 戻り値のない関数呼び出しのコードを組み立てる */
   private genVoidCallCode (node: AstCallFunc, parts: CallCodeParts): string {
-    const { funcCall, funcBegin, funcEnd } = parts
+    const { funcCall, funcBegin, funcEnd, callDone } = parts
     let code: string
     if (funcEnd === '') {
       code = `/*VOID関数呼出*/${funcBegin}${funcCall}\n`
     } else {
-      code = `/*VOID関数呼出(前後処理付)*/${funcBegin}try {\n${indentLines(funcCall, 1)};\n} finally {\n${indentLines(funcEnd, 1)}}\n`
+      // ローカル変数同期がある場合は、呼出が正常完了したときだけ書き戻すための完了フラグを立てる (#2534)
+      const doneLine = (callDone !== null) ? indentLines(`${callDone} = true;`, 1) + '\n' : ''
+      code = `/*VOID関数呼出(前後処理付)*/${funcBegin}try {\n${indentLines(funcCall, 1)};\n${doneLine}} finally {\n${indentLines(funcEnd, 1)}}\n`
     }
     // パフォーマンスモニタ:システム関数。ここでのcodeは式ではなく文なので、文として包む (#2333)
     if (parts.sysPerfKey) {
@@ -1798,10 +1806,13 @@ export class NakoGen {
     } else { // つまり、pure=falseの場合
       const varI = `$nako_i${this.loopId}`
       this.loopId++
+      // ローカル変数同期がある場合は、呼出が正常完了したときだけ書き戻すための完了フラグを立てる (#2534)
+      const doneLine = (parts.callDone !== null) ? indentLines(`${parts.callDone} = true;`, 2) + '\n' : ''
       code = `/* funcCallThis2 */(${funcDef}(){\n` +
         indentLines(funcBegin, 1) + '\n' +
         indentLines('try {', 1) + '\n' +
         indentLines(`let ${varI} = ${funcCall};`, 2) + '\n' +
+        doneLine +
         indentLines(`return ${varI};`, 2) + '\n' +
         indentLines('} finally {', 2) + '\n' +
         indentLines(funcEnd, 1) + '\n' +
@@ -1869,10 +1880,12 @@ export class NakoGen {
     // なお asyncFn のプラグイン関数は登録時に pure=true に強制される (core#142) が、
     // reset() では pure=true 化前のスナップショットから funclist が再構築されるため
     // pure=false のまま残りうる。同期ウィンドウが await を跨がないようここでも除外する。
-    if (res.i === 0 && this.varslistSet.length > 3 && func.pure !== true && func.asyncFn !== true && this.speedMode.forcePure === 0) { // undefinedはfalseとみなす
+    let callDone: string | null = null
+    if (res.i === 0 && this.varslistSet.length > 3 && func.pure !== true && !func.asyncFn && this.speedMode.forcePure === 0) { // undefinedはfalseとみなす
       const sync = this.genLocalVarsSyncCode()
       funcBegin += sync.begin
       funcEnd += sync.end
+      callDone = sync.doneVar
     }
     // 変数「それ」が補完されていることをヒントとして出力
     if (argsOpts.sore) { funcBegin += '/*[sore]*/' }
@@ -1901,7 +1914,7 @@ export class NakoGen {
       ? this.getPerfMonitorKey(funcName, '_sys')
       : null
 
-    const parts: CallCodeParts = { funcDef, funcCall, funcBegin, funcEnd, isAsync: !!func.asyncFn, sysPerfKey }
+    const parts: CallCodeParts = { funcDef, funcCall, funcBegin, funcEnd, isAsync: !!func.asyncFn, sysPerfKey, callDone }
     return (func.return_none)
       ? this.genVoidCallCode(node, parts)
       : this.genValueCallCode(node, isExpression, parts)
